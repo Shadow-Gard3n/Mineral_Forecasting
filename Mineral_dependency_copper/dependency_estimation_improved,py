@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. DATA LOADING & PREPARATION
+# ==========================================
+def load_data():
+    """Loads CSVs and defines manual production data."""
+    # Load Trade Data
+    try:
+        df_exp = pd.read_csv('copper_data_exports.csv')
+        df_imp = pd.read_csv('copper_data_imports.csv')
+    except FileNotFoundError:
+        print("Error: CSV files not found. Please ensure 'copper_data_exports.csv' and 'copper_data_imports.csv' are in the folder.")
+        return None, None, None
+    
+    # Filter for valid values (Remove zero trades)
+    df_exp = df_exp[df_exp['VALUE'] > 0].copy()
+    df_imp = df_imp[df_imp['VALUE'] > 0].copy()
+    
+    # Manual Production Data (Copper Concentrate)
+    # Source: User provided text input
+    prod_data = {
+        'FY': ['2019-20', '2020-21', '2021-22', '2022-23', '2023-24', '2024-25'],
+        'Production_Tonnes': [124586, 108718, 115313, 112745, 125230, 105012]
+    }
+    df_prod = pd.DataFrame(prod_data)
+    
+    return df_exp, df_imp, df_prod
+
+# ==========================================
+# 2. UTILITY FUNCTIONS
+# ==========================================
+def get_financial_year(row):
+    """Converts Calendar Year/Month to Indian Financial Year (Apr-Mar)."""
+    try:
+        y = int(row['Year'])
+        m = row['Month']
+        months = {'Jan':1, 'Feb':2, 'Mar':3, 'Apr':4, 'May':5, 'Jun':6, 
+                  'Jul':7, 'Aug':8, 'Sep':9, 'Oct':10, 'Nov':11, 'Dec':12}
+        m_num = months.get(m, 0)
+        
+        # FY Logic: Apr-Dec is current year, Jan-Mar is previous year part of FY
+        if m_num >= 4:
+            return f"{y}-{str(y+1)[-2:]}"
+        else:
+            return f"{y-1}-{str(y)[-2:]}"
+    except:
+        return None
+
+def calculate_hhi(shares_percent):
+    """Calculates Herfindahl-Hirschman Index (Market Concentration)."""
+    return (shares_percent ** 2).sum()
+
+def calculate_shannon(shares_fraction):
+    """Calculates Shannon-Wiener Diversity Index (Supply Resilience)."""
+    # Filter > 0 to avoid log(0) error
+    shares_clean = shares_fraction[shares_fraction > 0]
+    return - (shares_clean * np.log(shares_clean)).sum()
+
+# ==========================================
+# 3. ANALYSIS FUNCTIONS
+# ==========================================
+def analyze_supply_risk(df_trade, target_fy):
+    """Calculates HHI and Diversity Index for a specific Financial Year."""
+    # Filter by FY
+    df_fy = df_trade[df_trade['FY'] == target_fy].copy()
+    
+    if df_fy.empty:
+        return None, 0, 0
+    
+    # Group by Country
+    country_groups = df_fy.groupby('CTY')['VALUE'].sum().reset_index()
+    total_val = country_groups['VALUE'].sum()
+    
+    # Calculate Shares
+    country_groups['Share'] = country_groups['VALUE'] / total_val
+    country_groups['Share_Percent'] = country_groups['Share'] * 100
+    
+    # Metrics
+    hhi = calculate_hhi(country_groups['Share_Percent'])
+    shannon = calculate_shannon(country_groups['Share'])
+    
+    return country_groups, hhi, shannon
+
+def calculate_nir_dependency(df_prod, df_exp, df_imp):
+    """Merges production and trade data to calculate Net Import Reliance."""
+    # Aggregate Trade Data by FY
+    # Note: 'QTY' in CSV is in KGS. Convert to TONNES (/1000) for matching production
+    exp_fy = df_exp.groupby('FY')['QTY'].sum() / 1000
+    imp_fy = df_imp.groupby('FY')['QTY'].sum() / 1000
+    
+    # Merge with Production DataFrame
+    df_calc = df_prod.merge(imp_fy.rename("Import_Tonnes"), left_on='FY', right_index=True, how='left')
+    df_calc = df_calc.merge(exp_fy.rename("Export_Tonnes"), left_on='FY', right_index=True, how='left')
+    df_calc = df_calc.fillna(0)
+    
+    # Calculate NIR Formula
+    # Apparent Consumption = Production + Imports - Exports
+    df_calc['Consumption'] = df_calc['Production_Tonnes'] + df_calc['Import_Tonnes'] - df_calc['Export_Tonnes']
+    
+    # Net Import Reliance % = (Net Imports / Consumption) * 100
+    df_calc['Net_Imports'] = df_calc['Import_Tonnes'] - df_calc['Export_Tonnes']
+    df_calc['NIR_Percent'] = (df_calc['Net_Imports'] / df_calc['Consumption']) * 100
+    
+    return df_calc
+
+# ==========================================
+# 4. VISUALIZATION DASHBOARD
+# ==========================================
+def plot_dashboard(df_dep, imp_conc_df, imp_hhi, target_fy):
+    """Generates a combined dashboard of Strategic Dependency."""
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Plot 1: Strategic Dependency (Stacked Bar + Line)
+    # Shows the massive gap between what is mined (Green) and what is imported (Red)
+    ax1 = plt.subplot(2, 2, (1, 2)) # Spans top row
+    ax1.bar(df_dep['FY'], df_dep['Production_Tonnes'], label='Domestic Production', color='green', alpha=0.7)
+    ax1.bar(df_dep['FY'], df_dep['Net_Imports'], bottom=df_dep['Production_Tonnes'], label='Net Imports', color='firebrick', alpha=0.7)
+    
+    ax2 = ax1.twinx()
+    ax2.plot(df_dep['FY'], df_dep['NIR_Percent'], color='black', marker='o', linewidth=2, linestyle='--', label='Dependency % (NIR)')
+    ax2.set_ylabel('Net Import Reliance (%)', fontsize=12)
+    ax2.set_ylim(0, 110) # NIR is usually 0-100%
+    
+    ax1.set_title('Strategic Mineral Dependency: Production vs Imports', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Quantity (Tonnes)', fontsize=12)
+    ax1.legend(loc='upper left')
+    ax2.legend(loc='upper right')
+    ax1.grid(axis='y', linestyle='--', alpha=0.5)
+
+    # Plot 2: Import Concentration (Pie Chart)
+    # Shows WHO controls that red bar (Risk of single supplier)
+    ax3 = plt.subplot(2, 2, 3)
+    if imp_conc_df is not None:
+        imp_conc_df = imp_conc_df.sort_values('Share', ascending=False)
+        # Group small players into "Rest of World" for cleaner chart
+        if len(imp_conc_df) > 5:
+            top_5 = imp_conc_df.head(5)
+            others_val = imp_conc_df.iloc[5:]['VALUE'].sum()
+            others_row = pd.DataFrame([{'CTY': 'Rest of World', 'VALUE': others_val, 'Share': others_val/imp_conc_df['VALUE'].sum()}])
+            plot_data = pd.concat([top_5, others_row])
+        else:
+            plot_data = imp_conc_df
+            
+        ax3.pie(plot_data['Share'], labels=plot_data['CTY'], autopct='%1.1f%%', startangle=140)
+        ax3.set_title(f'Import Sources ({target_fy})\nHHI Risk: {imp_hhi:.0f} (High > 2500)', fontsize=12)
+
+    # Plot 3: The Gap Analysis
+    # Shows the widening deficit
+    ax4 = plt.subplot(2, 2, 4)
+    ax4.plot(df_dep['FY'], df_dep['Consumption'], marker='s', label='Apparent Consumption (Need)', color='blue')
+    ax4.plot(df_dep['FY'], df_dep['Production_Tonnes'], marker='^', label='Domestic Production (Have)', color='green')
+    ax4.set_title('Strategic Deficit: Demand vs Supply', fontsize=12)
+    ax4.fill_between(df_dep['FY'], df_dep['Production_Tonnes'], df_dep['Consumption'], color='gray', alpha=0.1, label='Strategic Deficit')
+    ax4.legend()
+    ax4.grid(True, linestyle='--', alpha=0.5)
+
+    plt.tight_layout()
+    plt.savefig('combined_analysis.png')
+    plt.show()
+
+# ==========================================
+# 5. EXECUTION BLOCK
+# ==========================================
+if __name__ == "__main__":
+    # 1. Load Data
+    df_exp, df_imp, df_prod = load_data()
+    
+    if df_exp is not None:
+        # 2. Process Dates
+        df_exp['FY'] = df_exp.apply(get_financial_year, axis=1)
+        df_imp['FY'] = df_imp.apply(get_financial_year, axis=1)
+
+        # 3. Calculate Dependency (NIR)
+        df_dependency = calculate_nir_dependency(df_prod, df_exp, df_imp)
+
+        # 4. Calculate Supply Risk (HHI) for latest representative year
+        target_year = '2023-24' 
+        imp_groups, imp_hhi, imp_shannon = analyze_supply_risk(df_imp, target_year)
+
+        # 5. Output Text Report
+        print(f"--- MINERAL DEPENDENCY REPORT: COPPER CONCENTRATE ---")
+        print(f"Analysis Year: {target_year}")
+        print(f"Import Dependency (NIR): {df_dependency[df_dependency['FY']==target_year]['NIR_Percent'].values[0]:.1f}%")
+        print(f"Market Concentration (HHI): {imp_hhi:.0f} (Scale 0-10,000)")
+        print(f"Supply Diversity (Shannon): {imp_shannon:.2f}")
+        print("\nSee 'combined_analysis.png' for visual dashboard.")
+
+        # 6. Generate Plots
+        plot_dashboard(df_dependency, imp_groups, imp_hhi, target_year)
